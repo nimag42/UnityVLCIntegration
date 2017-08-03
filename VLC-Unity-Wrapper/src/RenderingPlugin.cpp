@@ -8,12 +8,27 @@
 #include <vector>
 
 #include "GLEW/glew.h"
+#include "GLEW/glew.h"
+#include <X11/X.h>
+#include <X11/Xlib.h>
+#include <GL/gl.h>
+#include <GL/glx.h>
+
+#include <vlc_common.h>
+#include <vlc_fourcc.h>
 extern "C"
 {
 #include <stdlib.h>
 #include <pthread.h>
 #include <unistd.h>
+
 #include <vlc/vlc.h>
+#include <vlc_fs.h>
+
+#include <va/va_drmcommon.h>
+#include <va/va_drm.h>
+#include <va/va_x11.h>
+#include <fcntl.h>
 }
 
 static RenderAPI* s_CurrentAPI = NULL;
@@ -21,7 +36,7 @@ static UnityGfxRenderer s_DeviceType = kUnityGfxRendererNull;
 
 static float g_Time;
 
-static void* g_TextureHandle = NULL;
+static GLuint g_TextureHandle = (size_t) NULL;
 static int   g_TextureWidth  = 0;
 static int   g_TextureHeight = 0;
 static int   g_TextureRowPitch = 0;
@@ -33,9 +48,18 @@ GLuint bufferTexture;
 GLuint fboId;
 
 
+VADisplay dpy;
+VANativeDisplay native;
+
+Display *display;
+VADisplay vaGLXdisplay;
+
+GLXContext unityGLContext;
+GLXContext helperGLContext;
+
 void debugImage(unsigned char * beginning, int nbPixels)
 {
-  for (unsigned char *ptr = beginning + g_TextureWidth*g_TextureHeight; ptr < beginning + g_TextureWidth*g_TextureHeight + 4*nbPixels; ptr++)
+  for (unsigned char *ptr = beginning; ptr < beginning + nbPixels; ptr++)
     {
       fprintf (stderr, "%x", *ptr);
     }
@@ -50,112 +74,91 @@ void debugTexture(GLuint texture, int nbPixels)
   debugImage(check, nbPixels);
 }
 
-void createTexture() {
-  glGenTextures(1, &bufferTexture);
-  fprintf(stderr, "1: %d ; ", glGetError());
-  glBindTexture(GL_TEXTURE_2D, bufferTexture);
-  fprintf(stderr, "2: %d ; ", glGetError());
-
-  // glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
-  // fprintf(stderr, "3: %d ; ", glGetError());
-  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
-  fprintf(stderr, "4: %d ; ", glGetError());
-  // glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
-  // fprintf(stderr, "5: %d ; ", glGetError());
-  // glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S,
-		  // GL_CLAMP_TO_EDGE);
-  // fprintf(stderr, "6: %d ; ", glGetError());
-  // glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T,
-		  // GL_CLAMP_TO_EDGE);
-  // fprintf(stderr, "7: %d ; ", glGetError());
-  // glTexEnvf(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_MODULATE);
-  // fprintf(stderr, "8: %d ; ", glGetError());
-
-  glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, g_TextureWidth, g_TextureHeight, 0, GL_BGRA, GL_UNSIGNED_BYTE, NULL);
-  fprintf(stderr, "9: %d", glGetError());
+void format_cb (void **opaque, char *chroma,
+		unsigned *width, unsigned *height,
+		unsigned *x_offset, unsigned *y_offset,
+		unsigned *visible_width,
+		unsigned *visible_height,
+		void **device)
+{
+  memcpy(chroma, "VAOP", 4);
+  fprintf(stderr, "Chroma %s", chroma);
+  // *width = g_TextureWidth;
+  // *height = g_TextureHeight;
+  // *x_offset = 0;
+  // *y_offset = 0;
+  // *visible_width = g_TextureWidth;
+  // *visible_height = g_TextureHeight;
+  *device = dpy;
+  fprintf(stderr, "VADisplay: %p, device: %p\n", dpy, *device);
 }
 
-/* lockfct
- * Callback for LibVLC to lock data before decoding
- */
-extern "C" void *
-lockfct (void *data, void **p_pixels)
+VAStatus status = 0;
+VASurfaceID surface;
+VAImage image;
+void *glx_surface = NULL;
+
+void cleanup_cb (void *opaque)
+{
+  vlc_close((intptr_t) native);
+}
+
+void display_cb (void *opaque, void *const *planes,
+				unsigned *pitches, unsigned *lines)
 {
   // Lock the mutex to ensure data safeness
   pthread_mutex_lock(&mutex);
 
+  glXMakeCurrent (display, (size_t) NULL, helperGLContext);
+
+  status = vaDeriveImage(dpy, surface, &image);
+  if (status != VA_STATUS_SUCCESS)
+    fprintf(stderr, "VA-API: vaDeriveImage failed\n");
+
+
+  /********** RECUPERATION EN CPU */
+  unsigned char* buffer = 0;
+  status = vaMapBuffer(dpy, image.buf, (void **)&buffer);
+  if (status != VA_STATUS_SUCCESS)
+    fprintf(stderr, "VA-API: vaMapBuffer failed\n");
+
   free(vlcVideoFramePtr);
   vlcVideoFramePtr = (unsigned char *) malloc (g_TextureWidth * g_TextureHeight * 4);
-  *p_pixels = vlcVideoFramePtr;
+  for(unsigned char * i = vlcVideoFramePtr; i < vlcVideoFramePtr + g_TextureWidth * g_TextureHeight * 4; i+=4) { *i = 0xCC; }
 
-  //fprintf(stderr, "[CUSTOMVLC] LOCK FUNCTION Called   : Texture PTR: %p, DataPTR: %p\n", g_TextureHandle, *p_pixels);
+  memcpy(vlcVideoFramePtr, (void *) buffer, g_TextureWidth * g_TextureHeight);
 
-  return NULL;
-}
+  /****** Copy to intermediate buffer (simulate vbridge) */
+  // fprintf(stderr, "\n[LIBVLC] Rendering to intermediate buffer :\n");
+  glBindTexture(GL_TEXTURE_2D, bufferTexture);
+  glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, g_TextureWidth, g_TextureHeight, GL_RGB, GL_UNSIGNED_BYTE, vlcVideoFramePtr);
 
-/* unlockfct
- * Callback for LibVLC to release datas
- */
-extern "C" void
-unlockfct (void *data, void *id, void * const *p_pixels)
-{
+  // CLEANING UP
+  status = vaUnmapBuffer(dpy, image.buf);
+  if (status != VA_STATUS_SUCCESS)
+    fprintf(stderr, "VA-API: vaUnmapBuffer failed\n");
+
+  status = vaDestroyImage(dpy, image.image_id);
+  if (status != VA_STATUS_SUCCESS)
+    fprintf(stderr, "VA-API: vaDestroyBuffer failed\n");
+
   // Release datas
   pthread_mutex_unlock(&mutex);
 }
 
 // --------------------------------------------------------------------------
 // SetTimeFromUnity, an example function we export which is called by one of the scripts.
-
 extern "C" void UNITY_INTERFACE_EXPORT UNITY_INTERFACE_API SetTimeFromUnity (float t) { g_Time = t; }
 
 // --------------------------------------------------------------------------
 // ModifyTexturePixels, an example function we export which is called by one of the scripts.
-
 static void
 ModifyTexturePixels ()
 {
-  void* textureHandle = g_TextureHandle;
-  int width = g_TextureWidth;
-  int height = g_TextureHeight;
-  GLuint gltex = (GLuint)(size_t)(textureHandle);
-  if (!gltex)
-    return;
-    
   // Lock mutex to ensure all datas had been written
   pthread_mutex_lock(&mutex);
-    
-  // int textureRowPitch;
-  // void* textureDataPtr = s_CurrentAPI->BeginModifyTexture(textureHandle, width, height, &textureRowPitch);
-  // if (!textureDataPtr)
-    // return;
 
-  //fprintf(stderr, "[CUSTOMVLC] MODIFY TEXTURE Called  : Texture PTR: %p, DataPTR: %p\n", textureHandle, textureDataPtr);
-
-  /*
-  unsigned char* ptr = (unsigned char *) textureDataPtr;
-  unsigned char* origin = (unsigned char *) vlcVideoFramePtr;
-    
-  for (int i = 0; i < height*width*4; ++i)
-    {
-      *ptr = *origin;
-      ++ptr;
-      ++origin;
-    }
-  */
-
-  // s_CurrentAPI->EndModifyTexture(textureHandle, width, height, textureRowPitch, vlcVideoFramePtr);
-
-  /********************* UGLY TESTING HERE **************************/
-
-  /****** Copy to intermediate buffer (simulate vbridge) */
-  fprintf(stderr, "\n[LIBVLC] Rendering to intermediate buffer :\n");
-
-  fprintf(stderr, "1: %d ; ", glGetError());
-  glBindTexture(GL_TEXTURE_2D, bufferTexture);
-  fprintf(stderr, "2: %d ; ", glGetError());
-  glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, g_TextureWidth, g_TextureHeight, GL_RGBA, GL_UNSIGNED_BYTE, vlcVideoFramePtr);
-  fprintf(stderr, "3: %d ; ", glGetError());
-  //debugTexture(bufferTexture, 100);
+  fprintf(stderr, "\n[LIBVLC] Unity's CB :\n");
 
   /****** in-GPU copy from intermediate buffer to Unity's */
   fprintf(stderr, "\n[LIBVLC] In-GPU Copy :\n");
@@ -163,22 +166,11 @@ ModifyTexturePixels ()
   // We need to bind to a specific FBO to copy the texture
   glBindFramebuffer(GL_FRAMEBUFFER, fboId);
 
-  // // Test various stuff to debug
-  // fprintf(stderr, "Texture %d exists: %d  ", bufferTexture, glIsTexture(bufferTexture));
-  // fprintf(stderr, "Texture %d exists: %d  ", textureHandle, glIsTexture(gltex));
-  // fprintf(stderr, "FBO status: %d ; ", glCheckFramebufferStatus(GL_READ_FRAMEBUFFER));
-  // GLint result; glGetIntegerv(GL_READ_FRAMEBUFFER_BINDING, &result);
-  // fprintf(stderr, "READ_FBO bound to %d  ", (int) result);
-
-
   glFramebufferTexture2D(GL_READ_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, bufferTexture, 0);
-  fprintf(stderr, "1: %s ; ", gluErrorString(glGetError()));
   glReadBuffer(GL_COLOR_ATTACHMENT0);
-  fprintf(stderr, "2: %s ; ", gluErrorString(glGetError()));
-  glBindTexture(GL_TEXTURE_2D, gltex);
-  fprintf(stderr, "3: %s ; ", gluErrorString(glGetError()));
-  glCopyTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, 0, 0, width, height);
-  fprintf(stderr, "4: %s ; ", gluErrorString(glGetError()));
+  glBindTexture(GL_TEXTURE_2D, g_TextureHandle);
+  glCopyTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, 0, 0, g_TextureWidth, g_TextureHeight);
+
 
   // Rebing to default FBO
   glBindFramebuffer(GL_FRAMEBUFFER, 0);
@@ -194,7 +186,7 @@ SetTextureFromUnity (void* textureHandle, int w, int h)
   // A script calls this at initialization time; just remember the texture pointer here.
   // Will update texture pixels each frame from the plugin rendering event (texture update
   // needs to happen on the rendering thread).
-  g_TextureHandle = textureHandle;
+  g_TextureHandle = (GLuint)(size_t) textureHandle;
   g_TextureWidth = w;
   g_TextureHeight = h;
 }
@@ -210,25 +202,87 @@ libvlc_media_t *m;
  * redeclare the LibVLC's function for the keyword
  * UNITY_INTERFACE_EXPORT and UNITY_INTERFACE_API
  */
-
 extern "C" void UNITY_INTERFACE_EXPORT UNITY_INTERFACE_API
 launchVLC (char *videoURL)
-{
-  // Create an FBO
+{  
+
+  /***** Create VAAPI context and stuff */
+    static const char *const drm_device_paths[] = {
+    "/dev/dri/renderD128",
+    "/dev/dri/card0"
+  };
+
+  for (size_t i = 0; i < ARRAY_SIZE(drm_device_paths); i++)
+    {
+      int drm_fd = vlc_open(drm_device_paths[i], O_RDWR);
+      if (drm_fd == -1)
+	continue;
+
+      fprintf(stderr, "Trying device: %s\n", drm_device_paths[i]);
+      dpy = vaGetDisplayDRM(drm_fd);
+      if (dpy)
+	{
+	  native = (VANativeDisplay *)(intptr_t) drm_fd;
+	  fprintf(stderr, "DPY: %p, Native: %p\n", dpy, native);
+	  break;
+	}
+      else
+	vlc_close(drm_fd);
+    }
+
+ 
+  /***** Create GL stuff */
+
+  // Get render OpenGL context
+  unityGLContext = glXGetCurrentContext();
+
+  // Create an FBO for copy
   glGenFramebuffers(1, &fboId);
 
-  // Create temporary texture
-  fprintf(stderr, "\n\n[LIBVLC] Create texture :\n");
-  createTexture();
+  // Create a helper OpenGL (EGL) context
+
+  display = XOpenDisplay(NULL);
+  vaGLXdisplay = vaGetDisplay (display);
+
+  // Create a helper OpenGL (GLX) context
+  int scrnum = DefaultScreen (display);
+  int attrib[] = { GLX_RGBA,
+  		   GLX_RED_SIZE, 1,
+  		   GLX_GREEN_SIZE, 1,
+  		   GLX_BLUE_SIZE, 1,
+  		   GLX_DOUBLEBUFFER, None };
+  XVisualInfo* visinfo = glXChooseVisual (display, scrnum, attrib);
+  if (!visinfo)
+    fprintf(stderr, "Error: couldn't get an RGB, Double-buffered visual\n");
+
+  // Create a context with unityGLContext as shared lists
+  helperGLContext = glXCreateContext(display, visinfo, unityGLContext, true);
+  // glXMakeCurrent (display, (size_t) NULL, helperGLContext);
+
+  // Create a buffer for texture
+  glEnable(GL_TEXTURE_2D);
+  glGenTextures(1, &bufferTexture);
+  glBindTexture(GL_TEXTURE_2D, bufferTexture);
+  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+  glPixelStorei(GL_UNPACK_ALIGNMENT, 4);
+  glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, g_TextureWidth, g_TextureHeight, 0, GL_BGRA,
+  	       GL_UNSIGNED_BYTE, NULL);
+  glBindTexture(GL_TEXTURE_2D, 0);
 
   // Create a mutex, to share data between LibVLC's callback and Unity
   fprintf (stderr, "[LIBVLC] Instantiating mutex...\n");
   if (pthread_mutex_init (&mutex, NULL) != 0)
     fprintf(stderr, "[LIBVLC] Mutex init failed\n");
 
+  const char * const vlc_args[] = {
+    "--verbose=3",};
+
   // Create an instance of LibVLC
   fprintf(stderr, "[LIBVLC] Instantiating LibLVC : %s...\n", libvlc_get_version());
-  inst = libvlc_new (0, NULL);
+  inst = libvlc_new (sizeof(vlc_args) / sizeof(vlc_args[0]), vlc_args);
   if (inst == NULL)
     fprintf(stderr, "[LIBVLC] Error instantiating LibVLC\n");
 
@@ -237,6 +291,10 @@ launchVLC (char *videoURL)
   m = libvlc_media_new_location (inst, videoURL);
   if (m == NULL)
     fprintf(stderr, "[LIBVLC] Error initializing media\n");
+
+  libvlc_media_add_option(m, ":avcodec-hw=vaapi");
+  libvlc_media_add_option(m, "-vvv");
+
   mp = libvlc_media_player_new_from_media (m);
   if (mp == NULL)
     fprintf(stderr, "[LIBVLC] Error initializing media player\n");
@@ -251,8 +309,8 @@ launchVLC (char *videoURL)
 
   // Set callbacks for activating vmem. Vmem let us handle video output
   // separatly from LibVLC classical way
-  libvlc_video_set_callbacks(mp, lockfct, unlockfct, NULL, NULL);
-  libvlc_video_set_format(mp, "RV32", g_TextureWidth, g_TextureHeight, g_TextureWidth*4);
+  libvlc_media_player_set_vbridge_callbacks(mp, format_cb, cleanup_cb, NULL, display_cb, NULL);
+
 
   // Play the media
   libvlc_media_player_play (mp);
@@ -290,7 +348,7 @@ pauseVLC ()
 extern "C" int UNITY_INTERFACE_EXPORT UNITY_INTERFACE_API
 getLengthVLC ()
 {
-  fprintf(stderr, "[CUSTOMVLC] Length %d", (int) libvlc_media_player_get_length (mp));
+  fprintf(stderr, "[CUSTOMVLC] Length %d\n", (int) libvlc_media_player_get_length (mp));
   return (int) libvlc_media_player_get_length (mp);
 }
 
