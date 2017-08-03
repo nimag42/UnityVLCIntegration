@@ -47,6 +47,7 @@ static pthread_mutex_t mutex = PTHREAD_MUTEX_INITIALIZER;
 GLuint bufferTexture;
 GLuint fboId;
 
+GLuint program;
 
 VADisplay dpy;
 VANativeDisplay native;
@@ -59,6 +60,51 @@ GLXContext helperGLContext;
 
 // EGLint major, minor;
 // EGLDisplay eglDisplay;
+
+const GLchar* fragmentShader_src = "\
+precision highp float;\
+varying vec2 v_yTexCoord;\
+varying vec4 v_effectTexCoord;\
+\
+uniform sampler2D y_texture;\
+uniform sampler2D u_texture;\
+uniform sampler2D v_texture;\
+\
+void main()\
+{\
+  float y = texture2D(y_texture, v_yTexCoord).r;\
+  float u = texture2D(u_texture, v_yTexCoord ).r;\
+  float v = texture2D(v_texture, v_yTexCoord ).r;\
+  \
+  \
+  y = 1.1643 * ( y - 0.0625 );\
+  \
+  u = u - 0.5;\
+  v = v - 0.5;\
+  \
+  float r = y + 1.5958 * v;\
+  float g = y - 0.39173 * u - 0.81290 * v;\
+  float b = y + 2.017 * u;\
+  \
+  gl_FragColor = vec4(r,g,b, 1.0);\
+}";
+
+const GLchar* vertexShader_src = "\
+attribute vec4 a_position;\
+attribute vec2 a_yTexCoord;\
+attribute vec4 a_effectTexCoord;\
+\
+varying vec2 v_yTexCoord;\
+varying vec4 v_effectTexCoord;\
+uniform mat4 u_MVPMatrix;\
+\
+void main()\
+{\
+  v_yTexCoord = a_yTexCoord;\
+  v_effectTexCoord = a_effectTexCoord;\
+  gl_Position = u_MVPMatrix * a_position;\
+}\
+";
 
 void debugImage(unsigned char * beginning, int nbPixels)
 {
@@ -176,6 +222,7 @@ ModifyTexturePixels ()
   glBindTexture(GL_TEXTURE_2D, g_TextureHandle);
   glCopyTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, 0, 0, g_TextureWidth, g_TextureHeight);
 
+  // glUseProgram(program);
 
   // Rebing to default FBO
   glBindFramebuffer(GL_FRAMEBUFFER, 0);
@@ -283,6 +330,61 @@ launchVLC (char *videoURL)
 
 
   // vaCreateSurfaceGLX (vaGLXdisplay, GL_TEXTURE_2D, bufferTexture, &glx_surface);
+
+  /***** Initialization of YUV->RGB shader */
+
+  //Create an empty vertex shader handle
+  GLuint vertexShader = glCreateShader(GL_VERTEX_SHADER);
+  GLuint fragmentShader = glCreateShader(GL_FRAGMENT_SHADER);
+
+  //Send the vertex shader source code to GL
+  glShaderSource(vertexShader, 1, &vertexShader_src, 0);
+  glShaderSource(fragmentShader, 1, &fragmentShader_src, 0);
+
+  //Compile shaders
+  glCompileShader(vertexShader);
+  glCompileShader(fragmentShader);
+
+
+  GLint isCompiled = 0;
+  glGetShaderiv(vertexShader, GL_COMPILE_STATUS, &isCompiled);
+  if(isCompiled == GL_FALSE)
+    {
+      fprintf(stderr, "Vertex shader compile error");
+      glDeleteShader(vertexShader);
+    }
+  glGetShaderiv(fragmentShader, GL_COMPILE_STATUS, &isCompiled);
+  if(isCompiled == GL_FALSE)
+    {
+      fprintf(stderr, "Vertex shader compile error");
+      glDeleteShader(fragmentShader);
+    }
+
+  //Vertex and fragment shaders are successfully compiled.
+  program = glCreateProgram();
+
+  //Attach our shaders to our program
+  glAttachShader(program, vertexShader);
+  glAttachShader(program, fragmentShader);
+
+  //Link our program
+  glLinkProgram(program);
+
+  //Note the different functions here: glGetProgram* instead of glGetShader*.
+  GLint isLinked = 0;
+  glGetProgramiv(program, GL_LINK_STATUS, (int *)&isLinked);
+  if(isLinked == GL_FALSE)
+    {
+      fprintf(stderr, "Shader linking error");
+      glDeleteProgram(program);
+      glDeleteShader(vertexShader);
+      glDeleteShader(fragmentShader);
+   }
+
+  glDetachShader(program, vertexShader);
+  glDetachShader(program, fragmentShader);
+
+  fprintf(stderr, "[LIBVLC] Shader compiled and linked");
 
   /***** Initialization of LibVLC */
   // Create a mutex, to share data between LibVLC's callback and Unity
