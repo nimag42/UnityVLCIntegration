@@ -57,6 +57,9 @@ VADisplay vaGLXdisplay;
 GLXContext unityGLContext;
 GLXContext helperGLContext;
 
+// EGLint major, minor;
+// EGLDisplay eglDisplay;
+
 void debugImage(unsigned char * beginning, int nbPixels)
 {
   for (unsigned char *ptr = beginning; ptr < beginning + nbPixels; ptr++)
@@ -244,7 +247,11 @@ launchVLC (char *videoURL)
   // Create a helper OpenGL (EGL) context
 
   display = XOpenDisplay(NULL);
-  vaGLXdisplay = vaGetDisplay (display);
+  // vaGLXdisplay = vaGetDisplay (display);
+
+  // eglDisplay = eglGetDisplay(display);
+  // eglInitialize(eglDisplay, &major, &minor);
+  // eglBindAPI(EGL_OPENGL_API);
 
   // Create a helper OpenGL (GLX) context
   int scrnum = DefaultScreen (display);
@@ -274,6 +281,10 @@ launchVLC (char *videoURL)
   	       GL_UNSIGNED_BYTE, NULL);
   glBindTexture(GL_TEXTURE_2D, 0);
 
+
+  // vaCreateSurfaceGLX (vaGLXdisplay, GL_TEXTURE_2D, bufferTexture, &glx_surface);
+
+  /***** Initialization of LibVLC */
   // Create a mutex, to share data between LibVLC's callback and Unity
   fprintf (stderr, "[LIBVLC] Instantiating mutex...\n");
   if (pthread_mutex_init (&mutex, NULL) != 0)
