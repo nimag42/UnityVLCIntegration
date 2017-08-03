@@ -162,6 +162,8 @@ void display_cb (void *opaque, void *const *planes,
 
   glXMakeCurrent (display, (size_t) NULL, helperGLContext);
 
+  surface = (size_t) planes[0];
+
   status = vaDeriveImage(dpy, surface, &image);
   if (status != VA_STATUS_SUCCESS)
     fprintf(stderr, "VA-API: vaDeriveImage failed\n");
