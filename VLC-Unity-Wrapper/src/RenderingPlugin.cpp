@@ -106,6 +106,8 @@ void cleanup_cb (void *opaque)
 void display_cb (void *opaque, void *const *planes,
 				unsigned *pitches, unsigned *lines)
 {
+  fprintf(stderr, "\nIn VLC's cb :\n");
+
   // Lock the mutex to ensure data safeness
   pthread_mutex_lock(&mutex);
 
@@ -116,7 +118,7 @@ void display_cb (void *opaque, void *const *planes,
     fprintf(stderr, "VA-API: vaDeriveImage failed\n");
 
 
-  /********** RECUPERATION EN CPU */
+  /********* RECUPERATION EN CPU */
   unsigned char* buffer = 0;
   status = vaMapBuffer(dpy, image.buf, (void **)&buffer);
   if (status != VA_STATUS_SUCCESS)
@@ -310,7 +312,6 @@ launchVLC (char *videoURL)
   // Set callbacks for activating vmem. Vmem let us handle video output
   // separatly from LibVLC classical way
   libvlc_media_player_set_vbridge_callbacks(mp, format_cb, cleanup_cb, NULL, display_cb, NULL);
-
 
   // Play the media
   libvlc_media_player_play (mp);
